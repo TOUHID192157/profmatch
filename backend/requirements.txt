@@ -15,3 +15,4 @@ supabase>=2.3.0
 voyageai
 psycopg2-binary>=2.9.9
 email-validator>=2.1.0
+pgvector==0.3.6
