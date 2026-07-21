@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+﻿from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -18,16 +18,16 @@ class Settings(BaseSettings):
     supabase_db_url: str
 
     # Anthropic (Claude)
-    anthropic_api_key: str
+    anthropic_api_key: str | None = None
 
     # Voyage AI
-    voyage_api_key: str
+    voyage_api_key: str | None = None
 
     # Tavily
-    tavily_api_key: str
+    tavily_api_key: str | None = None
 
     # Resend
-    resend_api_key: str
+    resend_api_key: str | None = None
     email_from: str = "noreply@yourdomain.com"
 
     # CORS
