@@ -27,14 +27,12 @@ def get_voyage_client() -> voyageai.AsyncClient:
 
 async def close_voyage_client() -> None:
     """
-    Gracefully close the underlying AsyncClient session. Call this on
-    app shutdown (e.g. a FastAPI shutdown event) to avoid leaking the
-    HTTP connection pool.
+    Reset the cached AsyncClient reference on app shutdown. Voyage AI's
+    client does not expose an explicit close method, so this simply
+    drops our reference so a fresh client is created if needed again.
     """
     global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
+    _client = None
 
 
 def _clean_texts(texts: list[str]) -> list[str]:

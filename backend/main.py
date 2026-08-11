@@ -2,7 +2,7 @@
 from fastapi.middleware.cors import CORSMiddleware
 from app.services.embedding_service import close_voyage_client
 
-from app.api.routes import auth, profile
+from app.api.routes import auth, profile, search
 from app.core.config import settings
 from app.db.database import Base, engine
 
@@ -20,6 +20,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(profile.router)
+app.include_router(search.router)
 
 
 @app.get("/")
