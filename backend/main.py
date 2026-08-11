@@ -1,5 +1,6 @@
 ﻿from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.services.embedding_service import close_voyage_client
 
 from app.api.routes import auth, profile
 from app.core.config import settings
@@ -29,3 +30,7 @@ def root():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_voyage_client()

@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # Anthropic (Claude)
     anthropic_api_key: str | None = None
 
+    # Gemini 
+    gemini_api_key: str | None = None
+
     # Voyage AI
     voyage_api_key: str | None = None
 
