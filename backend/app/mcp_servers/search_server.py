@@ -10,7 +10,10 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:
+    from fastmcp import FastMCP
 
 from app.services.search_service import (
     search_professors_web,
