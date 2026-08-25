@@ -17,17 +17,32 @@ class Settings(BaseSettings):
     supabase_key: str
     supabase_db_url: str
 
-    # Anthropic (Claude)
+    # Anthropic (Claude) — kept optional in case we switch back later
     anthropic_api_key: str | None = None
+    #OpenRouter 
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://gorouter.app/v1"
+    openrouter_model: str = "claude-3-5-sonnet-20241022"
 
-    # Gemini 
+    # Google Gemini — multiple keys (one per teammate) rotated to
+    # spread out free-tier rate limits.
     gemini_api_key: str | None = None
+    gemini_api_key_2: str | None = None
+    gemini_api_key_3: str | None = None
+    gemini_api_key_4: str | None = None
 
-    # Voyage AI
+    # Voyage AI — same rotation idea
     voyage_api_key: str | None = None
+    voyage_api_key_2: str | None = None
+    voyage_api_key_3: str | None = None
 
-    # Tavily
+    # Tavily — same rotation idea
     tavily_api_key: str | None = None
+    tavily_api_key_2: str | None = None
+
+   
+
+   
 
     # Resend
     resend_api_key: str | None = None

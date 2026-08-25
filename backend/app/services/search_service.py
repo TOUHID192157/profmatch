@@ -3,46 +3,45 @@ Search service — finds professors matching a student's research profile.
 
 Flow:
   1. Use Tavily to search the web for professors in the student's field.
-  2. Use Gemini to extract structured professor info from raw search results.
+  2. Use OpenRouter (Claude 3.5 Sonnet) to extract structured professor info from raw search results.
   3. Embed each professor's research summary (Voyage AI).
   4. Store professors + embeddings in Supabase.
   5. Run a pgvector similarity search to rank professors against the
      student's own profile embedding.
-"""
 
+Both Tavily and Gemini clients are created fresh per call using the
+next key in rotation (app.core.key_rotation), spreading requests
+across multiple free-tier accounts to avoid rate limits.
+
+find_missing_email() is called on-demand (one professor at a time,
+triggered by the user) rather than automatically for every professor
+in a search, to avoid hitting API rate limits.
+"""
+import asyncio
 import json
 import uuid
+import httpx
 
 from tavily import TavilyClient
 from google import genai
 
 from app.core.config import settings
+from app.core.key_rotation import get_next_gemini_key, get_next_tavily_key
 from app.db.vector_store import supabase
 from app.services.embedding_service import (
     embed_professor_summaries,
     embed_student_profile,
 )
 
-_tavily_client: TavilyClient | None = None
-_gemini_client: genai.Client | None = None
-
 
 def get_tavily_client() -> TavilyClient:
-    global _tavily_client
-    if _tavily_client is None:
-        if not settings.tavily_api_key:
-            raise RuntimeError("TAVILY_API_KEY is not set. Add it to your .env file.")
-        _tavily_client = TavilyClient(api_key=settings.tavily_api_key)
-    return _tavily_client
+    """Create a Tavily client using the next key in rotation."""
+    return TavilyClient(api_key=get_next_tavily_key())
 
 
 def get_gemini_client() -> genai.Client:
-    global _gemini_client
-    if _gemini_client is None:
-        if not settings.gemini_api_key:
-            raise RuntimeError("GEMINI_API_KEY is not set. Add it to your .env file.")
-        _gemini_client = genai.Client(api_key=settings.gemini_api_key)
-    return _gemini_client
+    """Create a Gemini client using the next key in rotation."""
+    return genai.Client(api_key=get_next_gemini_key())
 
 
 async def search_professors_web(research_interests: str, max_results: int = 8) -> list[dict]:
@@ -65,13 +64,13 @@ async def search_professors_web(research_interests: str, max_results: int = 8) -
 
 async def extract_professors_with_gemini(raw_results: list[dict]) -> list[dict]:
     """
-    Use Gemini to turn raw Tavily search results (titles + content
-    snippets) into a clean, structured list of professor records.
+    Use Claude (via OpenRouter, a paid API) to turn raw Tavily search
+    results into a clean, structured list of professor records.
+    Switched from Gemini's free tier here specifically because this
+    call was the most frequent source of 503 overload errors.
     """
     if not raw_results:
         return []
-
-    client = get_gemini_client()
 
     combined_snippets = "\n\n".join(
         f"URL: {r.get('url', '')}\nTitle: {r.get('title', '')}\n"
@@ -97,13 +96,27 @@ SEARCH RESULTS:
 {combined_snippets}
 """
 
-    response = client.models.generate_content(
-        model="gemini-flash-latest", contents=prompt
-    )
+    try:
+        async with httpx.AsyncClient(timeout=45) as http_client:
+            response = await http_client.post(
+                "https://gorouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "anthropic/claude-3.5-sonnet",
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            text = data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[search_service] OpenRouter extraction failed: {e}")
+        return []
 
-    text = (response.text or "").strip()
-    # Gemini sometimes wraps JSON in markdown fences despite instructions
-    if text.startswith("`"):
+    if text.startswith("```"):
         text = text.strip("`")
         if text.startswith("json"):
             text = text[4:]
@@ -117,15 +130,66 @@ SEARCH RESULTS:
     return professors if isinstance(professors, list) else []
 
 
+async def find_missing_email(name: str, university: str) -> str:
+    """
+    Run a targeted search for a single professor's email address,
+    triggered on-demand by the user (not automatically for every
+    professor in a search, to avoid hitting rate limits).
+    """
+    client = get_tavily_client()
+    query = f'"{name}" {university} email contact faculty'
+
+    try:
+        response = client.search(query=query, search_depth="basic", max_results=3)
+    except Exception:
+        return ""
+
+    combined_snippets = "\n\n".join(
+        f"{r.get('title', '')}\n{r.get('content', '')[:500]}"
+        for r in response.get("results", [])
+    )
+
+    if not combined_snippets.strip():
+        return ""
+
+    gemini = get_gemini_client()
+    prompt = f"""Find the email address for {name} at {university} in the text below.
+Respond with ONLY the email address if found, or an empty string if not found.
+No other text, no explanation.
+
+TEXT:
+{combined_snippets}
+"""
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                gemini.models.generate_content,
+                model="gemini-flash-latest",
+                contents=prompt,
+            ),
+            timeout=15,
+        )
+        candidate = (response.text or "").strip()
+    except Exception:
+        return ""
+
+    if "@" in candidate and " " not in candidate and len(candidate) < 100:
+        return candidate
+    return ""
+
+
 async def store_professors(user_id: str, professors: list[dict]) -> list[dict]:
     """
     Embed and store a list of professor records in Supabase, tied to
-    the student (user_id) who triggered this search.
+    the student (user_id) who triggered this search. Email lookup for
+    missing addresses is NOT done here — it's on-demand per professor
+    via find_missing_email(), triggered from the frontend.
     """
     if not professors:
         return []
 
     embeddings = await embed_professor_summaries(professors)
+
     rows = []
     for professor, embedding in zip(professors, embeddings):
         rows.append({

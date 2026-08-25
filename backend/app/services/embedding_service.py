@@ -2,37 +2,32 @@
 Embedding service — wraps Voyage AI's embedding API for turning student
 profiles and professor research summaries into vectors for similarity
 matching (see app/db/vector_store.py for the pgvector search side).
+
+Each call creates a fresh AsyncClient using the next key in rotation
+(app.core.key_rotation), spreading requests across multiple free-tier
+Voyage accounts to avoid rate limits.
 """
 
 import voyageai
+from typing import Any
 
-from app.core.config import settings
+from app.core.key_rotation import get_next_voyage_key
 
 DEFAULT_EMBEDDING_MODEL = "voyage-large-2"
 
-_client: voyageai.AsyncClient | None = None
-
 
 def get_voyage_client() -> voyageai.AsyncClient:
-    """Lazily create the async Voyage AI client (only when actually needed)."""
-    global _client
-    if _client is None:
-        if not settings.voyage_api_key:
-            raise RuntimeError(
-                "VOYAGE_API_KEY is not set. Add it to your .env file."
-            )
-        _client = voyageai.AsyncClient(api_key=settings.voyage_api_key)
-    return _client
+    """Create a Voyage AsyncClient using the next key in rotation."""
+    return voyageai.AsyncClient(api_key=get_next_voyage_key())
 
 
 async def close_voyage_client() -> None:
     """
-    Reset the cached AsyncClient reference on app shutdown. Voyage AI's
-    client does not expose an explicit close method, so this simply
-    drops our reference so a fresh client is created if needed again.
+    No-op kept for compatibility with main.py's shutdown hook. Clients
+    are now created fresh per call (see get_voyage_client), so there is
+    no persistent client to close.
     """
-    global _client
-    _client = None
+    return None
 
 
 def _clean_texts(texts: list[str]) -> list[str]:
@@ -47,27 +42,16 @@ async def embed_texts(
 ) -> list[list[float]]:
     """
     Embed one or more pieces of text in a single API call (batching).
-
-    Args:
-        texts: Raw strings to embed. Empty/whitespace-only entries are
-            dropped automatically rather than raising.
-        input_type: "document" for content being stored/searched (e.g.
-            professor profiles), or "query" for the text doing the
-            searching (e.g. a student's profile when looking for matches).
-        model: Voyage embedding model name.
-
-    Returns:
-        A list of embedding vectors, one per non-empty input text, in
-        the same relative order. Returns an empty list if every input
-        was empty — callers should check for this rather than assume
-        a 1:1 index match with the original `texts` argument.
+    Returns an empty list if no valid texts are provided.
     """
     cleaned = _clean_texts(texts)
     if not cleaned:
         return []
 
     client = get_voyage_client()
-    result = await client.embed(cleaned, model=model, input_type=input_type)
+    result = await client.embed(
+        cleaned, model=model, input_type=input_type, truncation=True
+    )
     return result.embeddings
 
 
@@ -76,24 +60,18 @@ async def embed_text(
     input_type: str = "document",
     model: str = DEFAULT_EMBEDDING_MODEL,
 ) -> list[float] | None:
-    """
-    Embed a single piece of text. Returns None (instead of raising) if
-    the text is empty or whitespace-only, so callers can decide how to
-    handle a missing embedding without a try/except at every call site.
-    """
+    """Embed a single piece of text. Returns None if empty."""
     embeddings = await embed_texts([text], input_type=input_type, model=model)
     return embeddings[0] if embeddings else None
 
 
 async def embed_student_profile(
-    research_interests: str | None,
-    bio: str | None,
-    skills: list[str] | None,
+    research_interests: str | None = None,
+    bio: str | None = None,
+    skills: list[str] | None = None,
 ) -> list[float]:
     """
-    Combine a student's profile fields into one text blob and embed it
-    as a search query (input_type="query") — this vector is what gets
-    compared against professor document embeddings.
+    Combine student profile fields into a search query vector (input_type="query").
     """
     parts: list[str] = []
 
@@ -109,38 +87,31 @@ async def embed_student_profile(
     combined_text = (
         "\n".join(parts)
         if parts
-        else "A graduate student seeking a research advisor in computer science."
+        else "A student seeking academic research opportunities and faculty mentorship."
     )
 
     embedding = await embed_text(combined_text, input_type="query")
-    # combined_text is never empty (falls back to the default sentence
-    # above), so embedding should never be None here — but guard anyway
-    # since this vector is required for search to work at all.
     if embedding is None:
         raise RuntimeError("Failed to generate student profile embedding.")
     return embedding
 
 
 async def embed_professor_summaries(
-    professors: list[dict],
+    professors: list[dict[str, Any]],
 ) -> list[list[float]]:
     """
-    Batch-embed multiple professor profiles in one API call
-    (input_type="document"), instead of one request per professor.
-
-    Args:
-        professors: dicts with optional keys "name", "department",
-            "research_areas". Professors with no usable text after
-            cleaning are skipped, so the result may have fewer entries
-            than the input — do not assume index alignment with
-            `professors` when matching results back to records.
+    Batch-embed multiple professor profiles in one API call (input_type="document").
+    Guarantees placeholder fallback text for empty profiles so the returned list
+    maintains a 1:1 index alignment with the input list.
     """
-    texts = []
+    texts: list[str] = []
     for p in professors:
         name = (p.get("name") or "").strip()
         department = (p.get("department") or "").strip()
         research_areas = (p.get("research_areas") or "").strip()
-        text = f"{name}, {department}. Research areas: {research_areas}".strip(", .")
+
+        raw_text = f"{name}, {department}. Research areas: {research_areas}".strip(", .")
+        text = raw_text if raw_text else "Faculty member with unspecified research areas."
         texts.append(text)
 
     return await embed_texts(texts, input_type="document")

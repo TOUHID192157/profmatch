@@ -68,6 +68,7 @@ class ProfessorResultOut(BaseModel):
     research_areas: str | None = None
     profile_url: str | None = None
     match_reason: str | None = None
+    similarity: float | None = None
 
 
 # ---------- EMAIL DRAFTS ----------

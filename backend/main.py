@@ -1,10 +1,16 @@
-﻿from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from app.services.embedding_service import close_voyage_client
+﻿import sys
+import asyncio
 
-from app.api.routes import auth, profile, search
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.routes import auth, profile, search, email
 from app.core.config import settings
 from app.db.database import Base, engine
+from app.services.embedding_service import close_voyage_client
 
 Base.metadata.create_all(bind=engine)
 
@@ -21,6 +27,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(profile.router)
 app.include_router(search.router)
+app.include_router(email.router)
 
 
 @app.get("/")
@@ -31,6 +38,7 @@ def root():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
