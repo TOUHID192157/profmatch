@@ -73,6 +73,7 @@ async def run_research_agent(research_interests: str) -> dict:
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[_SERVER_SCRIPT],
+        env=os.enviorn.copy(),
     )
 
     try:
