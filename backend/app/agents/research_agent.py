@@ -164,7 +164,9 @@ async def run_research_agent(research_interests: str) -> dict:
                 return {"status": "error", "error": "Research agent did not finish in time.", "professors": []}
 
     except Exception as e:
+        import traceback
         print(f"[ResearchAgent] failed: {e}")
+        traceback.print_exc()
         return {"status": "error", "error": str(e), "professors": []}
 
 
