@@ -204,6 +204,10 @@ async def call_llm_with_tools(
                 print(f"[LLM] Turn {turn + 1}, Gemini attempt {attempt + 1} succeeded")
                 break
             except Exception as e:
+                import traceback
+                print(f"[Diag] ===== FULL TRACEBACK: Turn {turn + 1}, attempt {attempt + 1} =====")
+                traceback.print_exc()
+                print(f"[Diag] ===== END TRACEBACK =====")
                 msg = str(e)
                 reason = "429/503 rate-limited" if _is_retryable(msg) else "non-retryable error"
                 print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: FAILED ({reason})")
