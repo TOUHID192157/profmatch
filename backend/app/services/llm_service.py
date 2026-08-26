@@ -50,7 +50,7 @@ def _is_retryable(error_message: str) -> bool:
         for marker in [
             "RESOURCE_EXHAUSTED", "429",
             "UNAVAILABLE", "503",
-            "DEADLINE_EXCEEDED", "504,"timeout",
+            "DEADLINE_EXCEEDED", "504", "timeout",
         ]
     )
 
