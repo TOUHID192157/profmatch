@@ -30,7 +30,7 @@ _SERVER_SCRIPT = os.path.abspath(
 )
 
 # Prevent a stuck MCP/LLM operation from blocking the request indefinitely.
-OVERALL_TIMEOUT_SECONDS = 90
+OVERALL_TIMEOUT_SECONDS = 180
 
 # Maximum Gemini tool-calling turns for one research run.
 DEFAULT_MAX_TURNS = 4
