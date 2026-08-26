@@ -52,14 +52,24 @@ async def run_orchestrator(
 
     email_results = []
     for professor in top_professors:
-        result = await run_email_agent(
-            student_name=student_name,
-            student_bio=student_bio,
-            student_research_interests=student_research_interests,
-            professor=professor,
-            authorize_send=authorize_send,
-        )
-        result["professor_name"] = professor.get("name", "Unknown")
+        try:
+            result = await run_email_agent(
+                student_name=student_name,
+                student_bio=student_bio,
+                student_research_interests=student_research_interests,
+                professor=professor,
+                authorize_send=authorize_send,
+            )
+        except Exception as e:
+            print(f"[Orchestrator] Email Agent raised unexpectedly for "
+                  f"{professor.get('name', 'Unknown')}: {e}")
+            result = {
+                "status": "error",
+                "professor": {"name": professor.get("name", "Unknown"), "email": professor.get("email")},
+                "email": None,
+                "review": None,
+                "error": str(e),
+            }
         email_results.append(result)
 
     print("[Orchestrator] workflow complete")
