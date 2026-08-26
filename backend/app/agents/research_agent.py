@@ -3,6 +3,10 @@ Research Agent — professor discovery and relevance evaluation.
 
 Connects to the MCP search server via stdio and delegates all
 Gemini/tool-calling logic to the unified LLM service.
+
+DIAGNOSTIC VERSION: includes [Diag] logging at every stage boundary
+(MCP connection, tool discovery, Gemini turns, tool execution) to
+isolate exactly where hangs occur.
 """
 
 import asyncio
@@ -232,12 +236,19 @@ async def run_research_agent(
             env=os.environ.copy(),
         )
 
+        print("[Diag] MCP connection START")
         async with stdio_client(server_params) as (read, write):
+            print("[Diag] MCP connection SUCCESS (stdio streams ready)")
             async with ClientSession(read, write) as session:
+                print("[Diag] MCP session created")
 
+                print("[Diag] MCP session.initialize() START")
                 await session.initialize()
+                print("[Diag] MCP session.initialize() SUCCESS")
 
+                print("[Diag] MCP tools discovery START")
                 tools_response = await session.list_tools()
+                print("[Diag] MCP tools discovery SUCCESS")
 
                 if not tools_response.tools:
                     return {
@@ -263,17 +274,25 @@ async def run_research_agent(
                     tool_name: str,
                     tool_args: dict,
                 ) -> str:
+                    """
+                    Execute an MCP tool safely.
 
+                    Tool failures are returned to the LLM as structured
+                    error text instead of crashing the entire agent run.
+                    """
+                    print(f"[Diag] MCP tool call START: {tool_name}")
                     print(
                         f"[ResearchAgent] calling tool: "
                         f"{tool_name} args={tool_args}"
                     )
 
                     try:
+                        print(f"[Diag] MCP request SENT: {tool_name}")
                         result = await session.call_tool(
                             tool_name,
                             tool_args,
                         )
+                        print(f"[Diag] MCP response RECEIVED: {tool_name}")
 
                         text_parts: list[str] = []
 
@@ -283,6 +302,9 @@ async def run_research_agent(
 
                         output = "\n".join(text_parts).strip()
 
+                        print(f"[Diag] MCP response PARSED: {tool_name}")
+                        print(f"[Diag] MCP tool call END: {tool_name}")
+
                         if not output:
                             return '{"result": "Tool returned no text."}'
 
@@ -291,6 +313,9 @@ async def run_research_agent(
                     except Exception as exc:
                         error_message = str(exc)[:300]
 
+                        print(
+                            f"[Diag] MCP tool call FAILED: {tool_name} — {error_message}"
+                        )
                         print(
                             f"[ResearchAgent] tool "
                             f"'{tool_name}' failed: {error_message}"
@@ -308,6 +333,7 @@ async def run_research_agent(
                             '"}'
                         )
 
+                print("[Diag] call_llm_with_tools START")
                 result = await call_llm_with_tools(
                     system_prompt=_SYSTEM_PROMPT,
                     user_message=(
@@ -318,6 +344,7 @@ async def run_research_agent(
                     execute_tool=execute_tool,
                     max_turns=max_turns,
                 )
+                print("[Diag] call_llm_with_tools SUCCESS")
 
                 normalized = _normalize_result(result)
 

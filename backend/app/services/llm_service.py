@@ -9,16 +9,19 @@ Two interfaces:
   - call_llm_with_tools(system_prompt, user_message, tools, execute_tool)
       For multi-turn, function-calling agent loops (MCP tool use).
       Used by research_agent.py. Handles the Gemini function-calling
-      conversation loop internally, including key rotation and
-      fallback between turns.
+      conversation loop internally, including key rotation.
 
 Both share the same fallback chain: try each configured Gemini key in
 rotation; if all are rate-limited/unavailable, fall back to
-gorouter.app; if that also fails, raise LLMUnavailableError so the
-caller can decide how to handle a total outage.
+gorouter.app (single-turn calls only); if that also fails, raise
+LLMUnavailableError so the caller can decide how to handle a total
+outage.
 
 All Gemini SDK calls (which are synchronous) are wrapped in
 asyncio.to_thread() so they never block the event loop.
+
+DIAGNOSTIC VERSION: includes [Diag] logging at every Gemini
+request/response boundary to isolate exactly where hangs occur.
 """
 
 import asyncio
@@ -33,7 +36,7 @@ from app.core.config import settings
 from app.core.key_rotation import get_next_gemini_key, gemini_key_count
 
 GEMINI_MODEL = "gemini-flash-latest"
-MAX_AGENT_TURNS = 4  # per Phase 2 guidance: trim from 6 to ~4
+MAX_AGENT_TURNS = 4
 
 
 class LLMUnavailableError(Exception):
@@ -95,6 +98,8 @@ async def call_llm(prompt: str) -> str:
     errors: list[str] = []
 
     gemini_attempts = max(gemini_key_count(), 1)
+    print(f"[LLM] gemini_key_count() = {gemini_key_count()}")
+
     for attempt in range(gemini_attempts):
         try:
             result = await _try_gemini_once(prompt)
@@ -139,23 +144,16 @@ def strip_json_fences(text: str) -> str:
 # Multi-turn, function-calling (agent/tool-use) calls
 # ---------------------------------------------------------------------
 
-class ToolCallResult:
-    """Simple container so callers don't need genai_types directly."""
-    def __init__(self, name: str, args: dict):
-        self.name = name
-        self.args = args
-
-
 async def call_llm_with_tools(
     system_prompt: str,
     user_message: str,
-    tool_declarations: list,  # list of genai_types.FunctionDeclaration
+    tool_declarations: list,
     execute_tool: Callable[[str, dict], Awaitable[str]],
     max_turns: int = MAX_AGENT_TURNS,
 ) -> dict:
     """
-    Run a Gemini function-calling agent loop with full key rotation
-    and fallback. The caller supplies:
+    Run a Gemini function-calling agent loop with key rotation. The
+    caller supplies:
       - tool_declarations: Gemini FunctionDeclaration objects (built
         from MCP tool schemas by the caller, e.g. research_agent.py)
       - execute_tool: an async callback(tool_name, tool_args) -> str
@@ -163,10 +161,8 @@ async def call_llm_with_tools(
 
     Returns the final parsed JSON dict from the model once it stops
     requesting tool calls. Raises LLMUnavailableError only if every
-    Gemini key AND gorouter.app fail on the same turn (gorouter is
-    used as a plain-text fallback without tool support, so it's only
-    tried as a last resort to at least get *some* answer rather than
-    a hard failure).
+    Gemini key fails on the same turn (no gorouter fallback here,
+    since gorouter doesn't support this tool-calling flow).
     """
     contents = [
         genai_types.Content(role="user", parts=[genai_types.Part(text=user_message)])
@@ -177,24 +173,30 @@ async def call_llm_with_tools(
     )
 
     gemini_attempts = max(gemini_key_count(), 1)
+    print(f"[Diag] call_llm_with_tools: gemini_key_count() = {gemini_key_count()}, max_turns = {max_turns}")
 
     for turn in range(max_turns):
+        print(f"[Diag] Gemini Turn {turn + 1} START")
         response = None
         turn_errors: list[str] = []
 
         for attempt in range(gemini_attempts):
             try:
+                print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: request SENT")
+
                 def _sync_call():
                     client = genai.Client(api_key=get_next_gemini_key())
                     return client.models.generate_content(
                         model=GEMINI_MODEL, contents=contents, config=config
                     )
                 response = await asyncio.to_thread(_sync_call)
+                print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: response RECEIVED")
                 print(f"[LLM] Turn {turn + 1}, Gemini attempt {attempt + 1} succeeded")
                 break
             except Exception as e:
                 msg = str(e)
                 reason = "429/503 rate-limited" if _is_retryable(msg) else "non-retryable error"
+                print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: FAILED ({reason})")
                 print(f"[LLM] Turn {turn + 1}, Gemini attempt {attempt + 1} failed: {reason}")
                 turn_errors.append(f"gemini[{attempt}]: {msg[:150]}")
                 if _is_retryable(msg):
@@ -202,6 +204,7 @@ async def call_llm_with_tools(
                 break
 
         if response is None:
+            print(f"[Diag] Gemini Turn {turn + 1}: ALL ATTEMPTS FAILED")
             raise LLMUnavailableError(
                 "All Gemini keys failed during agent turn. Details: "
                 + " | ".join(turn_errors)
@@ -214,8 +217,11 @@ async def call_llm_with_tools(
             if part.function_call
         ]
 
+        print(f"[Diag] Gemini Turn {turn + 1}: response PARSED, function_calls={len(function_calls)}")
+
         if not function_calls:
             text = strip_json_fences(response.text or "")
+            print(f"[Diag] Gemini Turn {turn + 1}: no function calls, treating as final answer")
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
@@ -224,7 +230,9 @@ async def call_llm_with_tools(
         contents.append(candidate.content)
 
         for fc in function_calls:
+            print(f"[Diag] Gemini Turn {turn + 1}: executing tool call '{fc.name}'")
             result_text = await execute_tool(fc.name, dict(fc.args))
+            print(f"[Diag] Gemini Turn {turn + 1}: tool call '{fc.name}' returned")
             contents.append(
                 genai_types.Content(
                     role="user",
@@ -239,6 +247,9 @@ async def call_llm_with_tools(
                 )
             )
 
+        print(f"[Diag] Gemini Turn {turn + 1} END")
+
+    print(f"[Diag] call_llm_with_tools: hit max_turns ({max_turns}) without final answer")
     return {
         "status": "error",
         "error": f"Agent did not finish within {max_turns} turns.",
