@@ -185,11 +185,21 @@ async def call_llm_with_tools(
                 print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: request SENT")
 
                 def _sync_call():
-                    client = genai.Client(api_key=get_next_gemini_key())
+                    client = genai.Client(
+                        api_key=get_next_gemini_key(),
+                        http_options=genai_types.HttpOptions(timeout=30_000),  # 30s, milliseconds
+                    )
                     return client.models.generate_content(
                         model=GEMINI_MODEL, contents=contents, config=config
                     )
-                response = await asyncio.to_thread(_sync_call)
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(_sync_call), timeout=35
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: HARD TIMEOUT (30s)")
+                    turn_errors.append(f"gemini[{attempt}]: hard timeout after 30s")
+                    continue
                 print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: response RECEIVED")
                 print(f"[LLM] Turn {turn + 1}, Gemini attempt {attempt + 1} succeeded")
                 break
