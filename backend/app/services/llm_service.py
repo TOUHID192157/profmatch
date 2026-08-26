@@ -47,7 +47,11 @@ class LLMUnavailableError(Exception):
 def _is_retryable(error_message: str) -> bool:
     return any(
         marker in error_message
-        for marker in ["RESOURCE_EXHAUSTED", "429", "UNAVAILABLE", "503"]
+        for marker in [
+            "RESOURCE_EXHAUSTED", "429",
+            "UNAVAILABLE", "503",
+            "DEADLINE_EXCEEDED", "504,"timeout",
+        ]
     )
 
 
