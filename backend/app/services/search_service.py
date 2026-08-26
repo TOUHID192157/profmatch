@@ -139,32 +139,76 @@ TEXT:
     return ""
 
 
+def _normalize(text: str) -> str:
+    return (text or "").strip().lower()
+
+
 async def store_professors(user_id: str, professors: list[dict]) -> list[dict]:
     """
     Embed and store a list of professor records in Supabase, tied to
     the student (user_id) who triggered this search.
+
+    Deduplicates against professors already stored for this user
+    (matched by normalized name + university) — updates the existing
+    row's data/embedding instead of inserting a new one, so repeated
+    searches don't pile up duplicate entries.
     """
     if not professors:
         return []
 
+    # Fetch this user's existing professors once, to check against.
+    existing_response = (
+        supabase.table("professor_results")
+        .select("id, name, university")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    existing_lookup = {
+        (_normalize(row["name"]), _normalize(row["university"])): row["id"]
+        for row in (existing_response.data or [])
+    }
+
     embeddings = await embed_professor_summaries(professors)
 
-    rows = []
+    new_rows = []
+    updates = []  # (id, data) pairs to update instead of insert
+
     for professor, embedding in zip(professors, embeddings):
-        rows.append({
-            "id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "name": professor.get("name", "") or "Unknown",
-            "university": professor.get("university", ""),
+        name = professor.get("name", "") or "Unknown"
+        university = professor.get("university", "")
+        key = (_normalize(name), _normalize(university))
+
+        data = {
+            "name": name,
+            "university": university,
             "department": professor.get("department", ""),
             "email": professor.get("email", ""),
             "research_areas": professor.get("research_areas", ""),
             "profile_url": professor.get("profile_url", ""),
             "embedding": embedding,
-        })
+        }
 
-    response = supabase.table("professor_results").insert(rows).execute()
-    return response.data or []
+        if key in existing_lookup:
+            updates.append((existing_lookup[key], data))
+        else:
+            new_rows.append({"id": str(uuid.uuid4()), "user_id": user_id, **data})
+
+    result_rows = []
+
+    if new_rows:
+        response = supabase.table("professor_results").insert(new_rows).execute()
+        result_rows.extend(response.data or [])
+
+    for row_id, data in updates:
+        response = (
+            supabase.table("professor_results")
+            .update(data)
+            .eq("id", row_id)
+            .execute()
+        )
+        result_rows.extend(response.data or [])
+
+    return result_rows
 
 
 async def find_matching_professors(
