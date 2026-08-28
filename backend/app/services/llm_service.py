@@ -226,6 +226,7 @@ async def _call_llm_with_tools_groq(
                 messages=messages,
                 tools=groq_tools,
                 tool_choice="auto",
+                max_tokens=4096,
             )
 
         response = await asyncio.to_thread(_sync_call)
@@ -259,17 +260,30 @@ async def _call_llm_with_tools_groq(
             }
         )
 
-        for tc in tool_calls:
-            args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            print(f"[Diag][Groq] Turn {turn + 1}: executing tool '{tc.function.name}'")
-            result_text = await execute_tool(tc.function.name, args)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result_text,
-                }
-            )
+        if not tool_calls:
+            text = strip_json_fences(message.content or "")
+            print(f"[Diag][Groq] Turn {turn + 1}: FINAL RESPONSE (raw, first 2000 chars):")
+            print(text[:2000])
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as e:
+                print(f"[Diag][Groq] JSON parse FAILED: {e}")
+                return {"status": "error", "error": "Could not parse final JSON.", "raw_text": text}
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in tool_calls
+                ],
+            }
+        )
 
     return {"status": "error", "error": f"Groq agent did not finish within {max_turns} turns."}
 

@@ -208,6 +208,9 @@ Return JSON only.
 No markdown.
 No code fences.
 No explanation outside the JSON.
+When giving your final answer, respond with plain text containing
+ONLY the JSON object — do NOT call any tool named "json" or similar.
+Simply write the JSON directly as your message content.
 """
 
 
