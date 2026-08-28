@@ -229,9 +229,35 @@ async def _call_llm_with_tools_groq(
                 max_tokens=4096,
             )
 
-        response = await asyncio.to_thread(_sync_call)
-        message = response.choices[0].message
+        try:
+            response = await asyncio.to_thread(_sync_call)
+        except Exception as e:
+            if "attempted to call tool 'json'" in str(e):
+                print(f"[Diag][Groq] Turn {turn + 1}: model tried to hallucinate a 'json' tool — retrying WITHOUT tools to force plain text")
 
+                def _sync_call_no_tools():
+                    client = Groq(api_key=settings.groq_api_key)
+                    return client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=messages
+                        + [
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Give your final answer now as a plain JSON "
+                                    "object in your message text. Do not call any "
+                                    "tool."
+                                ),
+                            }
+                        ],
+                        max_tokens=4096,
+                    )
+
+                response = await asyncio.to_thread(_sync_call_no_tools)
+            else:
+                raise
+
+        message = response.choices[0].message
         tool_calls = message.tool_calls or []
         print(f"[Diag][Groq] Turn {turn + 1}: tool_calls={len(tool_calls)}")
 
