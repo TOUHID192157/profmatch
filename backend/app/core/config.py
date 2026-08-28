@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://gorouter.app/v1"
     openrouter_model: str = "claude-3-5-sonnet-20241022"
+    groq_api_key: str | None = None
 
     # Google Gemini — multiple keys (one per teammate) rotated to
     # spread out free-tier rate limits.

@@ -1,27 +1,17 @@
 """
 Unified LLM provider layer.
 
+Provider order: Groq (primary, fast + generous free tier) -> Gemini
+(fallback, rotated across multiple keys) -> gorouter.app (last resort,
+single-turn calls only).
+
 Two interfaces:
   - call_llm(prompt) -> str
-      For simple, single-turn text generation (extraction, drafting,
-      review). Used by search_service.py, email_service.py, and
-      email_agent.py's review step.
+      Simple single-turn text generation.
   - call_llm_with_tools(system_prompt, user_message, tools, execute_tool)
-      For multi-turn, function-calling agent loops (MCP tool use).
-      Used by research_agent.py. Handles the Gemini function-calling
-      conversation loop internally, including key rotation.
-
-Both share the same fallback chain: try each configured Gemini key in
-rotation; if all are rate-limited/unavailable, fall back to
-gorouter.app (single-turn calls only); if that also fails, raise
-LLMUnavailableError so the caller can decide how to handle a total
-outage.
-
-All Gemini SDK calls (which are synchronous) are wrapped in
-asyncio.to_thread() so they never block the event loop.
-
-DIAGNOSTIC VERSION: includes [Diag] logging at every Gemini
-request/response boundary to isolate exactly where hangs occur.
+      Multi-turn function-calling agent loop (used by research_agent.py).
+      Groq and Gemini use different tool-schema formats internally,
+      handled transparently here.
 """
 
 import asyncio
@@ -31,12 +21,15 @@ from typing import Awaitable, Callable
 import httpx
 from google import genai
 from google.genai import types as genai_types
+from groq import Groq
 
 from app.core.config import settings
 from app.core.key_rotation import get_next_gemini_key, gemini_key_count
 
 GEMINI_MODEL = "gemini-flash-latest"
-MAX_AGENT_TURNS = 4
+GROQ_MODEL = "openai/gpt-oss-120b"
+MAX_AGENT_TURNS = 8
+_BACKOFF_SCHEDULE = [2, 5, 10]
 
 
 class LLMUnavailableError(Exception):
@@ -55,12 +48,34 @@ def _is_retryable(error_message: str) -> bool:
     )
 
 
+def strip_json_fences(text: str) -> str:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    return text
+
+
 # ---------------------------------------------------------------------
 # Simple single-turn calls
 # ---------------------------------------------------------------------
 
+async def _try_groq_once(prompt: str) -> str:
+    def _sync_call() -> str:
+        client = Groq(api_key=settings.groq_api_key)
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=4096,
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    return await asyncio.to_thread(_sync_call)
+
+
 async def _try_gemini_once(prompt: str) -> str:
-    """One Gemini attempt with the next key in rotation, off the event loop."""
     def _sync_call() -> str:
         client = genai.Client(api_key=get_next_gemini_key())
         response = client.models.generate_content(
@@ -72,7 +87,6 @@ async def _try_gemini_once(prompt: str) -> str:
 
 
 async def _try_gorouter(prompt: str) -> str:
-    """Last-resort fallback via gorouter.app."""
     if not settings.openrouter_api_key:
         raise LLMUnavailableError("No gorouter.app API key configured.")
 
@@ -95,30 +109,42 @@ async def _try_gorouter(prompt: str) -> str:
 
 async def call_llm(prompt: str) -> str:
     """
-    Simple single-turn LLM call with full fallback: tries every
-    configured Gemini key, then gorouter.app, then raises
-    LLMUnavailableError if everything fails.
+    Simple single-turn LLM call: Groq first, then Gemini (all rotated
+    keys), then gorouter.app, then raises LLMUnavailableError.
     """
     errors: list[str] = []
 
+    if settings.groq_api_key:
+        print("[LLM] Trying Groq (primary)")
+        try:
+            result = await _try_groq_once(prompt)
+            print("[LLM] Groq succeeded")
+            return result
+        except Exception as e:
+            print(f"[LLM] Groq failed: {str(e)[:150]}")
+            errors.append(f"groq: {str(e)[:150]}")
+
     gemini_attempts = max(gemini_key_count(), 1)
-    print(f"[LLM] gemini_key_count() = {gemini_key_count()}")
+    print(f"[LLM] Falling back to Gemini, gemini_key_count() = {gemini_key_count()}")
 
     for attempt in range(gemini_attempts):
+        print(f"[LLM] Gemini key-attempt {attempt + 1}/{gemini_attempts}: START")
         try:
             result = await _try_gemini_once(prompt)
-            print(f"[LLM] Gemini attempt {attempt + 1} succeeded")
+            print(f"[LLM] Gemini key-attempt {attempt + 1}: SUCCESS")
             return result
         except Exception as e:
             msg = str(e)
-            reason = "429/503 rate-limited" if _is_retryable(msg) else "non-retryable error"
-            print(f"[LLM] Gemini attempt {attempt + 1} failed: {reason}")
+            retryable = _is_retryable(msg)
+            print(f"[LLM] Gemini key-attempt {attempt + 1}: FAILED "
+                  f"({'retryable' if retryable else 'non-retryable'})")
             errors.append(f"gemini[{attempt}]: {msg[:150]}")
-            if _is_retryable(msg):
-                continue
-            break
+            if not retryable:
+                break
+        if attempt < len(_BACKOFF_SCHEDULE):
+            await asyncio.sleep(_BACKOFF_SCHEDULE[attempt])
 
-    print("[LLM] All Gemini keys failed, falling back to gorouter")
+    print("[LLM] Falling back to gorouter")
     try:
         result = await _try_gorouter(prompt)
         print("[LLM] gorouter succeeded")
@@ -133,41 +159,129 @@ async def call_llm(prompt: str) -> str:
     )
 
 
-def strip_json_fences(text: str) -> str:
-    """Shared helper: strip ```json ... ``` fences some models add despite instructions."""
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    return text
-
-
 # ---------------------------------------------------------------------
 # Multi-turn, function-calling (agent/tool-use) calls
 # ---------------------------------------------------------------------
 
-async def call_llm_with_tools(
+def _clean_groq_schema(schema):
+    """
+    Groq's tool schema validator requires lowercase JSON Schema type
+    values ("string", "object") and rejects extra metadata fields.
+    Gemini's SDK round-trips types to UPPERCASE enums (e.g. "STRING")
+    when you call .model_dump() on its Schema object — this fixes
+    both issues recursively.
+    """
+    if isinstance(schema, dict):
+        cleaned = {
+            k: _clean_groq_schema(v)
+            for k, v in schema.items()
+            if k not in {"title", "$defs", "$schema", "additionalProperties"}
+        }
+        if "type" in cleaned and isinstance(cleaned["type"], str):
+            cleaned["type"] = cleaned["type"].lower()
+        return cleaned
+    if isinstance(schema, list):
+        return [_clean_groq_schema(item) for item in schema]
+    return schema
+
+
+def _gemini_tool_to_groq_tool(tool: genai_types.FunctionDeclaration) -> dict:
+    """Convert a Gemini-style FunctionDeclaration into Groq's
+    OpenAI-compatible tool schema."""
+    raw_params = tool.parameters or {"type": "object", "properties": {}}
+    if hasattr(raw_params, "model_dump"):
+        raw_params = raw_params.model_dump(exclude_none=True)
+
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": _clean_groq_schema(raw_params),
+        },
+    }
+
+
+async def _call_llm_with_tools_groq(
     system_prompt: str,
     user_message: str,
     tool_declarations: list,
     execute_tool: Callable[[str, dict], Awaitable[str]],
-    max_turns: int = MAX_AGENT_TURNS,
+    max_turns: int,
 ) -> dict:
-    """
-    Run a Gemini function-calling agent loop with key rotation. The
-    caller supplies:
-      - tool_declarations: Gemini FunctionDeclaration objects (built
-        from MCP tool schemas by the caller, e.g. research_agent.py)
-      - execute_tool: an async callback(tool_name, tool_args) -> str
-        that actually runs the tool (e.g. via an MCP ClientSession)
+    """Groq's OpenAI-compatible function-calling loop."""
+    groq_tools = [_gemini_tool_to_groq_tool(t) for t in tool_declarations]
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
 
-    Returns the final parsed JSON dict from the model once it stops
-    requesting tool calls. Raises LLMUnavailableError only if every
-    Gemini key fails on the same turn (no gorouter fallback here,
-    since gorouter doesn't support this tool-calling flow).
-    """
+    for turn in range(max_turns):
+        print(f"[Diag][Groq] Turn {turn + 1} START")
+
+        def _sync_call():
+            client = Groq(api_key=settings.groq_api_key)
+            return client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                tools=groq_tools,
+                tool_choice="auto",
+            )
+
+        response = await asyncio.to_thread(_sync_call)
+        message = response.choices[0].message
+
+        tool_calls = message.tool_calls or []
+        print(f"[Diag][Groq] Turn {turn + 1}: tool_calls={len(tool_calls)}")
+
+        if not tool_calls:
+            text = strip_json_fences(message.content or "")
+            print(f"[Diag][Groq] Turn {turn + 1}: FINAL RESPONSE (raw, first 2000 chars):")
+            print(text[:2000])
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as e:
+                print(f"[Diag][Groq] JSON parse FAILED: {e}")
+                return {"status": "error", "error": "Could not parse final JSON.", "raw_text": text}
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in tool_calls
+                ],
+            }
+        )
+
+        for tc in tool_calls:
+            args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            print(f"[Diag][Groq] Turn {turn + 1}: executing tool '{tc.function.name}'")
+            result_text = await execute_tool(tc.function.name, args)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_text,
+                }
+            )
+
+    return {"status": "error", "error": f"Groq agent did not finish within {max_turns} turns."}
+
+
+async def _call_llm_with_tools_gemini(
+    system_prompt: str,
+    user_message: str,
+    tool_declarations: list,
+    execute_tool: Callable[[str, dict], Awaitable[str]],
+    max_turns: int,
+) -> dict:
+    """Gemini's function-calling loop (original implementation)."""
     contents = [
         genai_types.Content(role="user", parts=[genai_types.Part(text=user_message)])
     ]
@@ -177,69 +291,47 @@ async def call_llm_with_tools(
     )
 
     gemini_attempts = max(gemini_key_count(), 1)
-    print(f"[Diag] call_llm_with_tools: gemini_key_count() = {gemini_key_count()}, max_turns = {max_turns}")
 
     for turn in range(max_turns):
-        print(f"[Diag] Gemini Turn {turn + 1} START")
+        print(f"[Diag][Gemini] Turn {turn + 1} START")
         response = None
         turn_errors: list[str] = []
 
         for attempt in range(gemini_attempts):
-            try:
-                print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: request SENT")
+            def _sync_call():
+                client = genai.Client(api_key=get_next_gemini_key())
+                return client.models.generate_content(
+                    model=GEMINI_MODEL, contents=contents, config=config
+                )
 
-                def _sync_call():
-                    client = genai.Client(
-                        api_key=get_next_gemini_key(),
-                        http_options=genai_types.HttpOptions(timeout=30_000),  # 30s, milliseconds
-                    )
-                    return client.models.generate_content(
-                        model=GEMINI_MODEL, contents=contents, config=config
-                    )
-                try:
-                    response = await asyncio.wait_for(
-                        asyncio.to_thread(_sync_call), timeout=35
-                    )
-                except asyncio.TimeoutError:
-                    print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: HARD TIMEOUT (30s)")
-                    turn_errors.append(f"gemini[{attempt}]: hard timeout after 30s")
-                    continue
-                print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: response RECEIVED")
-                print(f"[LLM] Turn {turn + 1}, Gemini attempt {attempt + 1} succeeded")
+            try:
+                response = await asyncio.wait_for(asyncio.to_thread(_sync_call), timeout=35)
+                print(f"[Diag][Gemini] Turn {turn + 1}, key-attempt {attempt + 1}: SUCCESS")
                 break
+            except asyncio.TimeoutError:
+                print(f"[Diag][Gemini] Turn {turn + 1}, key-attempt {attempt + 1}: HARD TIMEOUT")
+                turn_errors.append(f"gemini[{attempt}]: hard timeout")
             except Exception as e:
-                import traceback
-                print(f"[Diag] ===== FULL TRACEBACK: Turn {turn + 1}, attempt {attempt + 1} =====")
-                traceback.print_exc()
-                print(f"[Diag] ===== END TRACEBACK =====")
                 msg = str(e)
-                reason = "429/503 rate-limited" if _is_retryable(msg) else "non-retryable error"
-                print(f"[Diag] Gemini Turn {turn + 1}, attempt {attempt + 1}: FAILED ({reason})")
-                print(f"[LLM] Turn {turn + 1}, Gemini attempt {attempt + 1} failed: {reason}")
+                retryable = _is_retryable(msg)
+                print(f"[Diag][Gemini] Turn {turn + 1}, key-attempt {attempt + 1}: FAILED "
+                      f"({'retryable' if retryable else 'non-retryable'})")
                 turn_errors.append(f"gemini[{attempt}]: {msg[:150]}")
-                if _is_retryable(msg):
-                    continue
-                break
+                if not retryable:
+                    break
+            if attempt < len(_BACKOFF_SCHEDULE):
+                await asyncio.sleep(_BACKOFF_SCHEDULE[attempt])
 
         if response is None:
-            print(f"[Diag] Gemini Turn {turn + 1}: ALL ATTEMPTS FAILED")
             raise LLMUnavailableError(
-                "All Gemini keys failed during agent turn. Details: "
-                + " | ".join(turn_errors)
+                "All Gemini keys failed during agent turn. Details: " + " | ".join(turn_errors)
             )
 
         candidate = response.candidates[0]
-        function_calls = [
-            part.function_call
-            for part in candidate.content.parts
-            if part.function_call
-        ]
-
-        print(f"[Diag] Gemini Turn {turn + 1}: response PARSED, function_calls={len(function_calls)}")
+        function_calls = [p.function_call for p in candidate.content.parts if p.function_call]
 
         if not function_calls:
             text = strip_json_fences(response.text or "")
-            print(f"[Diag] Gemini Turn {turn + 1}: no function calls, treating as final answer")
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
@@ -248,27 +340,45 @@ async def call_llm_with_tools(
         contents.append(candidate.content)
 
         for fc in function_calls:
-            print(f"[Diag] Gemini Turn {turn + 1}: executing tool call '{fc.name}'")
             result_text = await execute_tool(fc.name, dict(fc.args))
-            print(f"[Diag] Gemini Turn {turn + 1}: tool call '{fc.name}' returned")
             contents.append(
                 genai_types.Content(
                     role="user",
                     parts=[
                         genai_types.Part(
                             function_response=genai_types.FunctionResponse(
-                                name=fc.name,
-                                response={"result": result_text},
+                                name=fc.name, response={"result": result_text}
                             )
                         )
                     ],
                 )
             )
 
-        print(f"[Diag] Gemini Turn {turn + 1} END")
+    return {"status": "error", "error": f"Agent did not finish within {max_turns} turns."}
 
-    print(f"[Diag] call_llm_with_tools: hit max_turns ({max_turns}) without final answer")
-    return {
-        "status": "error",
-        "error": f"Agent did not finish within {max_turns} turns.",
-    }
+
+async def call_llm_with_tools(
+    system_prompt: str,
+    user_message: str,
+    tool_declarations: list,
+    execute_tool: Callable[[str, dict], Awaitable[str]],
+    max_turns: int = MAX_AGENT_TURNS,
+) -> dict:
+    """
+    Multi-turn function-calling agent loop: tries Groq first (fast,
+    generous free tier), falls back to Gemini (rotated keys) if Groq
+    is unavailable or fails.
+    """
+    if settings.groq_api_key:
+        print("[LLM] call_llm_with_tools: trying Groq (primary)")
+        try:
+            return await _call_llm_with_tools_groq(
+                system_prompt, user_message, tool_declarations, execute_tool, max_turns
+            )
+        except Exception as e:
+            print(f"[LLM] Groq agent loop failed, falling back to Gemini: {str(e)[:150]}")
+
+    print("[LLM] call_llm_with_tools: using Gemini")
+    return await _call_llm_with_tools_gemini(
+        system_prompt, user_message, tool_declarations, execute_tool, max_turns
+    )

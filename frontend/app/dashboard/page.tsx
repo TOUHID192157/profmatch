@@ -2,213 +2,178 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
+import Sidebar from "@/components/Sidebar";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Users, TrendingUp, Target } from "lucide-react";
 
 interface UserData {
   id: string;
   email: string;
   full_name: string;
-  is_active: boolean;
-  created_at: string;
 }
 
 interface ProfileData {
-  university: string | null;
-  degree: string | null;
-  major: string | null;
-  gpa: number | null;
-  graduation_year: number | null;
   research_interests: string | null;
   bio: string | null;
-  skills: string[] | null;
-  gre_score: number | null;
-  ielts_score: number | null;
+}
+
+interface Professor {
+  id: string;
+  name: string;
+  university: string;
+  similarity?: number;
 }
 
 export default function DashboardPage() {
   const router = useRouter();
   const [user, setUser] = useState<UserData | null>(null);
   const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [topMatches, setTopMatches] = useState<Professor[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     const token = localStorage.getItem("access_token");
-
     if (!token) {
       router.push("/login");
       return;
     }
 
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error("Session expired. Please log in again.");
+    Promise.all([
+      fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => (r.ok ? r.json() : null)),
+      fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/profile`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => (r.ok ? r.json() : null)),
+    ])
+      .then(([userData, profileData]) => {
+        if (!userData) {
+          router.push("/login");
+          return;
         }
-        return res.json();
-      })
-      .then((data: UserData) => {
-        setUser(data);
+        setUser(userData);
+        setProfile(profileData);
         setLoading(false);
       })
-      .catch((err: Error) => {
-        setError(err.message);
-        setLoading(false);
-        localStorage.removeItem("access_token");
-        router.push("/login");
-      });
-
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/profile`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then(async (res) => {
-        if (res.status === 404) return null;
-        if (!res.ok) return null;
-        return res.json();
-      })
-      .then((data: ProfileData | null) => {
-        setProfile(data);
-      })
-      .catch(() => setProfile(null));
+      .catch(() => setLoading(false));
   }, [router]);
-
-  const handleLogout = () => {
-    localStorage.removeItem("access_token");
-    router.push("/login");
-  };
-
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-gray-500">Loading...</p>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-red-500">{error}</p>
-      </div>
-    );
-  }
 
   const profileComplete = !!(
     profile &&
     (profile.research_interests || profile.bio)
   );
 
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#06070A] text-[#9AA3B2]">
+        Loading...
+      </div>
+    );
+  }
+
   return (
-    <div className="flex min-h-screen flex-col items-center gap-6 bg-gray-50 px-4 py-10">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle className="text-2xl">
-            Welcome, {user?.full_name}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-gray-500">{user?.email}</p>
+    <div className="min-h-screen bg-[#06070A] font-sans text-[#F5F6F8]">
+      <Sidebar />
+      <main className="ml-60 px-10 py-10">
+        <h1
+          className="mb-1 text-3xl font-semibold"
+          style={{ fontFamily: "var(--font-display)" }}
+        >
+          Welcome, {user?.full_name}
+        </h1>
+        <p className="mb-8 text-sm text-[#9AA3B2]">{user?.email}</p>
 
-          <div className="flex flex-col gap-2">
-            <Button
-              onClick={() => router.push("/matches")}
-              disabled={!profileComplete}
-            >
-              Find Matches
-            </Button>
-            <Button variant="outline" onClick={() => router.push("/profile")}>
-              Edit My Profile
-            </Button>
-            <Button variant="outline" onClick={handleLogout}>
-              Log Out
-            </Button>
+        {!profileComplete && (
+          <div className="mb-8 rounded-xl border border-[#4DA8FF]/30 bg-[#4DA8FF]/5 p-5">
+            <p className="mb-3 text-sm text-[#F5F6F8]">
+              Your research profile is incomplete. Add your interests to
+              start finding matches.
+            </p>
+            <Link href="/profile">
+              <Button className="bg-[#4DA8FF] text-[#06070A] hover:bg-[#6DB8FF]">
+                Complete My Profile
+              </Button>
+            </Link>
           </div>
+        )}
 
-          {!profileComplete && (
-            <p className="text-xs text-amber-600">
-              Add research interests or a bio to your profile to start
-              finding matches.
-            </p>
-          )}
-        </CardContent>
-      </Card>
+        {/* STAT CARDS */}
+        <div className="mb-10 grid grid-cols-3 gap-4">
+          <StatCard
+            icon={<Users size={20} />}
+            label="Professors Found"
+            value={topMatches.length > 0 ? String(topMatches.length) : "—"}
+          />
+          <StatCard
+            icon={<Target size={20} />}
+            label="Top Matches"
+            value={
+              topMatches.filter((p) => (p.similarity ?? 0) > 0.8).length > 0
+                ? String(topMatches.filter((p) => (p.similarity ?? 0) > 0.8).length)
+                : "—"
+            }
+          />
+          <StatCard
+            icon={<TrendingUp size={20} />}
+            label="Avg. Match"
+            value={
+              topMatches.length > 0
+                ? Math.round(
+                    (topMatches.reduce((sum, p) => sum + (p.similarity ?? 0), 0) /
+                      topMatches.length) *
+                      100
+                  ) + "%"
+                : "—"
+            }
+          />
+        </div>
 
-      {/* PROFILE SUMMARY */}
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle className="text-lg">My Profile</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {!profile ? (
-            <p className="text-sm text-gray-500">
-              You haven&apos;t created a profile yet.{" "}
-              <button
-                onClick={() => router.push("/profile")}
-                className="text-blue-600 underline"
-              >
-                Create one now
-              </button>
-            </p>
-          ) : (
-            <dl className="space-y-2 text-sm">
-              <Row label="University" value={profile.university} />
-              <Row label="Degree" value={profile.degree} />
-              <Row label="Major" value={profile.major} />
-              <Row
-                label="GPA"
-                value={profile.gpa != null ? String(profile.gpa) : null}
-              />
-              <Row
-                label="Graduation Year"
-                value={
-                  profile.graduation_year != null
-                    ? String(profile.graduation_year)
-                    : null
-                }
-              />
-              <Row
-                label="GRE Score"
-                value={
-                  profile.gre_score != null ? String(profile.gre_score) : null
-                }
-              />
-              <Row
-                label="IELTS Score"
-                value={
-                  profile.ielts_score != null
-                    ? String(profile.ielts_score)
-                    : null
-                }
-              />
-              <Row
-                label="Research Interests"
-                value={profile.research_interests}
-              />
-              <Row label="Bio" value={profile.bio} />
-              <Row
-                label="Skills"
-                value={
-                  profile.skills && profile.skills.length > 0
-                    ? profile.skills.join(", ")
-                    : null
-                }
-              />
-            </dl>
-          )}
-        </CardContent>
-      </Card>
+        {/* MAIN CTA */}
+        <div className="rounded-2xl border border-[#1C2029] bg-[#0B0D12] p-8 text-center">
+          <p className="mb-2 font-mono text-xs uppercase tracking-[0.2em] text-[#4DA8FF]">
+            Ready when you are
+          </p>
+          <h2
+            className="mb-4 text-2xl font-semibold"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            Find your matching professors
+          </h2>
+          <Link href="/matches">
+            <Button
+              disabled={!profileComplete}
+              className="bg-[#4DA8FF] px-8 text-[#06070A] hover:bg-[#6DB8FF]"
+            >
+              Start Search
+            </Button>
+          </Link>
+        </div>
+      </main>
     </div>
   );
 }
 
-function Row({ label, value }: { label: string; value: string | null }) {
+function StatCard({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
   return (
-    <div className="flex justify-between gap-4 border-b border-gray-100 pb-1.5">
-      <dt className="text-gray-500">{label}</dt>
-      <dd className="text-right text-gray-900">{value || "—"}</dd>
+    <div className="rounded-xl border border-[#1C2029] bg-[#0B0D12] p-5">
+      <div className="mb-3 flex items-center gap-2 text-[#4DA8FF]">
+        {icon}
+        <span className="font-mono text-xs uppercase tracking-wide text-[#9AA3B2]">
+          {label}
+        </span>
+      </div>
+      <p className="text-3xl font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+        {value}
+      </p>
     </div>
   );
 }

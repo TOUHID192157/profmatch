@@ -13,6 +13,8 @@ Flow:
 
 import json
 import uuid
+import logging
+logger = logging.getLogger("mcp_search_server")
 
 from tavily import TavilyClient
 
@@ -36,27 +38,35 @@ async def search_professors_web(research_interests: str, max_results: int = 8) -
     the given interests, restricted to US university (.edu) sites.
     """
     research_interests = research_interests or "computer science"
+    print(f"[Diag][Tavily] START, interests={research_interests!r}")
+
     client = get_tavily_client()
     query = (
         f"professors researching {research_interests} "
         f"faculty profile site:.edu"
     )
+    print(f"[Diag][Tavily] query = {query!r}")
+
     response = client.search(
         query=query,
         search_depth="advanced",
         max_results=max_results,
     )
-    return response.get("results", [])
+
+    results = response.get("results", [])
+    print(f"[Diag][Tavily] results count: {len(results)}")
+
+    return results
 
 
 async def extract_professors_with_gemini(raw_results: list[dict]) -> list[dict]:
     """
     Use the unified LLM service to turn raw Tavily search results
     (titles + content snippets) into a clean, structured list of
-    professor records. (Function name kept for compatibility with
-    existing callers — no longer necessarily Gemini specifically,
-    since call_llm() has its own fallback chain.)
+    professor records.
     """
+    print(f"[Diag][Extract] START, raw_results count={len(raw_results)}")
+
     if not raw_results:
         return []
 
@@ -85,9 +95,11 @@ SEARCH RESULTS:
 """
 
     try:
-        text = strip_json_fences(await call_llm(prompt))
+        raw_text = await call_llm(prompt)
+        logger.info(f"[Extract] LLM raw response (first 500 chars): {raw_text[:500]!r}")
+        text = strip_json_fences(raw_text)
     except LLMUnavailableError as e:
-        print(f"[search_service] extraction failed, all providers exhausted: {e}")
+        logger.info(f"[Extract] LLM call failed, all providers exhausted: {e}")
         return []
 
     if not text:
@@ -95,10 +107,13 @@ SEARCH RESULTS:
 
     try:
         professors = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.info(f"[Extract] JSON parse FAILED: {e}")
         return []
 
-    return professors if isinstance(professors, list) else []
+    result = professors if isinstance(professors, list) else []
+    logger.info(f"[Extract] parsed professors count={len(result)}")
+    return result
 
 
 async def find_missing_email(name: str, university: str) -> str:
@@ -139,76 +154,32 @@ TEXT:
     return ""
 
 
-def _normalize(text: str) -> str:
-    return (text or "").strip().lower()
-
-
 async def store_professors(user_id: str, professors: list[dict]) -> list[dict]:
     """
     Embed and store a list of professor records in Supabase, tied to
     the student (user_id) who triggered this search.
-
-    Deduplicates against professors already stored for this user
-    (matched by normalized name + university) — updates the existing
-    row's data/embedding instead of inserting a new one, so repeated
-    searches don't pile up duplicate entries.
     """
     if not professors:
         return []
 
-    # Fetch this user's existing professors once, to check against.
-    existing_response = (
-        supabase.table("professor_results")
-        .select("id, name, university")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    existing_lookup = {
-        (_normalize(row["name"]), _normalize(row["university"])): row["id"]
-        for row in (existing_response.data or [])
-    }
-
     embeddings = await embed_professor_summaries(professors)
 
-    new_rows = []
-    updates = []  # (id, data) pairs to update instead of insert
-
+    rows = []
     for professor, embedding in zip(professors, embeddings):
-        name = professor.get("name", "") or "Unknown"
-        university = professor.get("university", "")
-        key = (_normalize(name), _normalize(university))
-
-        data = {
-            "name": name,
-            "university": university,
+        rows.append({
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "name": professor.get("name", "") or "Unknown",
+            "university": professor.get("university", ""),
             "department": professor.get("department", ""),
             "email": professor.get("email", ""),
             "research_areas": professor.get("research_areas", ""),
             "profile_url": professor.get("profile_url", ""),
             "embedding": embedding,
-        }
+        })
 
-        if key in existing_lookup:
-            updates.append((existing_lookup[key], data))
-        else:
-            new_rows.append({"id": str(uuid.uuid4()), "user_id": user_id, **data})
-
-    result_rows = []
-
-    if new_rows:
-        response = supabase.table("professor_results").insert(new_rows).execute()
-        result_rows.extend(response.data or [])
-
-    for row_id, data in updates:
-        response = (
-            supabase.table("professor_results")
-            .update(data)
-            .eq("id", row_id)
-            .execute()
-        )
-        result_rows.extend(response.data or [])
-
-    return result_rows
+    response = supabase.table("professor_results").insert(rows).execute()
+    return response.data or []
 
 
 async def find_matching_professors(

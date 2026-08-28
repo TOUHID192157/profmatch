@@ -1,0 +1,28 @@
+2026-08-28 15:59:01,563 Processing request of type ListToolsRequest
+2026-08-28 15:59:03,958 Processing request of type CallToolRequest
+2026-08-28 15:59:03,960 search_professors called with: quantum computing
+2026-08-28 15:59:06,316 Tavily raw_results count: 8
+2026-08-28 15:59:14,635 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-08-28 15:59:14,667 [Extract] LLM raw response (first 500 chars): '[{"name":"Irinel Chiorescu","university":"Florida State University","department":"Physics / NHMFL","email":"","research_areas":"Quantum spin dynamics, superconducting chips for highly sensitive quantum measurements, on-chip superconducting cavities in the spin-photon strong coupling regime, superconducting quantum interference devices coupled to cavities as sensitive detectors of spin-photon states.","profile_url":""},{"name":"Rong Cong","university":"Florida State University","department":"NHMF'
+2026-08-28 15:59:14,723 [Extract] parsed professors count=24
+2026-08-28 15:59:14,724 Extracted professors count: 24
+2026-08-28 15:59:16,766 Processing request of type CallToolRequest
+2026-08-28 15:59:16,766 find_professor_email called for: Yongshan Ding at Yale University
+2026-08-28 15:59:20,520 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-08-28 15:59:20,521 Retrying request to /openai/v1/chat/completions in 16.000000 seconds
+2026-08-28 15:59:37,475 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-08-28 15:59:37,480 find_professor_email result: 'yongshan.ding@yale.edu'
+2026-08-28 15:59:57,137 Processing request of type CallToolRequest
+2026-08-28 15:59:57,138 find_professor_email called for: Andrew Cleland at University of Chicago
+2026-08-28 15:59:59,778 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-08-28 15:59:59,778 Retrying request to /openai/v1/chat/completions in 2.000000 seconds
+2026-08-28 16:00:02,033 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-08-28 16:00:02,034 Retrying request to /openai/v1/chat/completions in 6.000000 seconds
+2026-08-28 16:00:10,232 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-08-28 16:00:10,240 find_professor_email result: 'anc@uchicago.edu'
+2026-08-28 16:00:20,377 Processing request of type CallToolRequest
+2026-08-28 16:00:20,378 find_professor_email called for: Dieter van Melkebeek at University of Wisconsin–Madison
+2026-08-28 16:00:23,445 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-08-28 16:00:23,446 Retrying request to /openai/v1/chat/completions in 3.000000 seconds
+2026-08-28 16:00:27,532 HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-08-28 16:00:27,535 find_professor_email result: 'dieter@cs.wisc.edu'

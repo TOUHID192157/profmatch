@@ -37,7 +37,7 @@ _SERVER_SCRIPT = os.path.abspath(
 OVERALL_TIMEOUT_SECONDS = 540
 
 # Maximum Gemini tool-calling turns for one research run.
-DEFAULT_MAX_TURNS = 4
+DEFAULT_MAX_TURNS = 8
 
 _UNSUPPORTED_SCHEMA_KEYS = {
     "title",
@@ -137,25 +137,31 @@ AVAILABLE TOOLS:
 
 WORKFLOW:
 
-1. Start by calling search_professors using the student's research
-   interests.
+1. Call search_professors EXACTLY ONCE using the student's research
+   interests, in their original wording.
 
-2. Review the returned candidates.
+2. Do NOT call search_professors again — not with reworded queries,
+   not with narrower terms, not to "double-check." One search result
+   is what you have to work with.
 
-3. Evaluate relevance using ONLY the student's stated interests and
-   the professor's available research information.
+3. Immediately after receiving the search results, analyze them and
+   produce your final answer. Do not search again to try to get more
+   or better results.
 
-4. Assign each professor a relevance_score between 0.0 and 1.0.
+4. Evaluate relevance based ONLY on the student's stated interests
+   and the professor's available research information.
 
-5. Provide a concise one-sentence reason explaining the match.
+5. Assign every professor a relevance_score between 0.0 and 1.0.
 
-6. For highly relevant professors whose email is missing, use
-   find_professor_email.
+6. Provide a concise one-sentence reason explaining the match.
 
-7. Use email lookup selectively and avoid wasting turns on weak
+7. For highly relevant professors whose email is missing, use
+   find_professor_email — this tool may be called multiple times,
+   once per professor, but only for the top few most relevant
    candidates.
 
-8. Prefer quality and relevance over quantity.
+8. Prefer quality and relevance over producing a large number of
+   professors.
 
 IMPORTANT:
 - Never invent an email address.
@@ -270,6 +276,10 @@ async def run_research_agent(
                     ),
                 )
 
+                _search_professors_called = {"count": 0}
+                _email_lookup_attempted: set[tuple[str, str]] = set()
+                _MAX_EMAIL_LOOKUPS_PER_RUN = 3
+
                 async def execute_tool(
                     tool_name: str,
                     tool_args: dict,
@@ -279,7 +289,52 @@ async def run_research_agent(
 
                     Tool failures are returned to the LLM as structured
                     error text instead of crashing the entire agent run.
+                    A programmatic guard blocks repeat calls to
+                    search_professors — if the model tries anyway, it
+                    gets a message telling it to use the existing
+                    results instead of an actual re-search.
                     """
+                    if tool_name == "search_professors":
+                        if _search_professors_called["count"] >= 1:
+                            print(
+                                "[Diag] BLOCKED repeat search_professors call — "
+                                "returning guard message instead"
+                            )
+                            return (
+                                '{"error": "You already called search_professors. '
+                                'Analyze the existing results and produce the final '
+                                'answer now instead of searching again."}'
+                            )
+                        _search_professors_called["count"] += 1
+                    if tool_name == "find_professor_email":
+                        raw_name = str(tool_args.get("name", "")).strip().lower()
+                        raw_university = str(tool_args.get("university", "")).strip().lower()
+                        key = (raw_name, raw_university)
+
+                        if key in _email_lookup_attempted:
+                            print(
+                                f"[Diag] BLOCKED repeat find_professor_email for {key} — "
+                                "already attempted once"
+                            )
+                            return (
+                                '{"error": "Email lookup for this professor was already '
+                                'attempted. If it returned empty, leave the email field '
+                                'empty and move on — do not retry."}'
+                            )
+
+                        if len(_email_lookup_attempted) >= _MAX_EMAIL_LOOKUPS_PER_RUN:
+                            print(
+                                f"[Diag] BLOCKED find_professor_email — "
+                                f"reached max lookups per run ({_MAX_EMAIL_LOOKUPS_PER_RUN})"
+                            )
+                            return (
+                                '{"error": "Maximum email lookups reached for this run. '
+                                'Proceed to the final answer using what you have — leave '
+                                'remaining email fields empty rather than looking up more."}'
+                            )
+
+                        _email_lookup_attempted.add(key) 
+
                     print(f"[Diag] MCP tool call START: {tool_name}")
                     print(
                         f"[ResearchAgent] calling tool: "
@@ -303,9 +358,13 @@ async def run_research_agent(
                         output = "\n".join(text_parts).strip()
 
                         print(f"[Diag] MCP response PARSED: {tool_name}")
+                        print(f"[Diag] {tool_name} RAW OUTPUT LENGTH: {len(output)} chars")
+                        print(f"[Diag] {tool_name} RAW OUTPUT CONTENT:")
+                        print(output[:3000])  # first 3000 chars, enough to see structure
                         print(f"[Diag] MCP tool call END: {tool_name}")
 
                         if not output:
+                            print(f"[Diag] {tool_name}: OUTPUT IS EMPTY")
                             return '{"result": "Tool returned no text."}'
 
                         return output
