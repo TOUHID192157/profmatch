@@ -216,44 +216,32 @@ async def _call_llm_with_tools_groq(
         {"role": "user", "content": user_message},
     ]
 
+    def _sync_call(use_tools: bool):
+        client = Groq(api_key=settings.groq_api_key)
+        kwargs = dict(model=GROQ_MODEL, messages=messages, max_tokens=4096)
+        if use_tools:
+            kwargs["tools"] = groq_tools
+            kwargs["tool_choice"] = "auto"
+        return client.chat.completions.create(**kwargs)
+
     for turn in range(max_turns):
         print(f"[Diag][Groq] Turn {turn + 1} START")
 
-        def _sync_call():
-            client = Groq(api_key=settings.groq_api_key)
-            return client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                tools=groq_tools,
-                tool_choice="auto",
-                max_tokens=4096,
-            )
-
         try:
-            response = await asyncio.to_thread(_sync_call)
+            response = await asyncio.to_thread(_sync_call, True)
         except Exception as e:
-            if "attempted to call tool 'json'" in str(e):
-                print(f"[Diag][Groq] Turn {turn + 1}: model tried to hallucinate a 'json' tool — retrying WITHOUT tools to force plain text")
-
-                def _sync_call_no_tools():
-                    client = Groq(api_key=settings.groq_api_key)
-                    return client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=messages
-                        + [
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Give your final answer now as a plain JSON "
-                                    "object in your message text. Do not call any "
-                                    "tool."
-                                ),
-                            }
-                        ],
-                        max_tokens=4096,
-                    )
-
-                response = await asyncio.to_thread(_sync_call_no_tools)
+            if "'json'" in str(e) and "not in req" in str(e):
+                print(f"[Diag][Groq] Turn {turn + 1}: model hallucinated a 'json' tool — retrying without tools")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Give your final answer now as a plain JSON "
+                            "object in your message text. Do not call any tool."
+                        ),
+                    }
+                )
+                response = await asyncio.to_thread(_sync_call, False)
             else:
                 raise
 
@@ -286,32 +274,44 @@ async def _call_llm_with_tools_groq(
             }
         )
 
-        if not tool_calls:
-            text = strip_json_fences(message.content or "")
-            print(f"[Diag][Groq] Turn {turn + 1}: FINAL RESPONSE (raw, first 2000 chars):")
-            print(text[:2000])
+        # THIS is the piece that was missing: actually run each tool
+        # and feed its result back into the conversation.
+        for tc in tool_calls:
             try:
-                return json.loads(text)
-            except json.JSONDecodeError as e:
-                print(f"[Diag][Groq] JSON parse FAILED: {e}")
-                return {"status": "error", "error": "Could not parse final JSON.", "raw_text": text}
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+            print(f"[Diag][Groq] Turn {turn + 1}: executing tool '{tc.function.name}'")
+            result_text = await execute_tool(tc.function.name, args)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_text,
+                }
+            )
 
-        messages.append(
-            {
-                "role": "assistant",
-                "content": message.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in tool_calls
-                ],
-            }
-        )
-
-    return {"status": "error", "error": f"Groq agent did not finish within {max_turns} turns."}
+    # Finalization phase: tools are used up — force a plain-text JSON
+    # answer from whatever tool results are already in the conversation,
+    # rather than letting the model try (and fail) to call more tools.
+    print("[Diag][Groq] max_turns reached — forcing finalization without tools")
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "You have used all your available tool calls. Using "
+                "ONLY the tool results already in this conversation, "
+                "produce your final JSON answer now. Do not call any tool."
+            ),
+        }
+    )
+    try:
+        response = await asyncio.to_thread(_sync_call, False)
+        text = strip_json_fences(response.choices[0].message.content or "")
+        return json.loads(text)
+    except Exception as e:
+        print(f"[Diag][Groq] finalization failed: {e}")
+        return {"status": "error", "error": f"Groq agent did not finish within {max_turns} turns."}
 
 
 async def _call_llm_with_tools_gemini(

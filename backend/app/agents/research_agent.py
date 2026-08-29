@@ -21,7 +21,10 @@ from mcp.client.stdio import stdio_client
 from app.services.llm_service import (
     LLMUnavailableError,
     call_llm_with_tools,
+    call_llm,
+    strip_json_fences,
 )
+import json as _json
 
 
 _SERVER_SCRIPT = os.path.abspath(
@@ -282,6 +285,7 @@ async def run_research_agent(
                 _search_professors_called = {"count": 0}
                 _email_lookup_attempted: set[tuple[str, str]] = set()
                 _MAX_EMAIL_LOOKUPS_PER_RUN = 3
+                _captured_search_output = {"text": None}
 
                 async def execute_tool(
                     tool_name: str,
@@ -360,6 +364,9 @@ async def run_research_agent(
 
                         output = "\n".join(text_parts).strip()
 
+                        if tool_name == "search_professors" and output and _captured_search_output["text"] is None:
+                            _captured_search_output["text"] = output
+
                         print(f"[Diag] MCP response PARSED: {tool_name}")
                         print(f"[Diag] {tool_name} RAW OUTPUT LENGTH: {len(output)} chars")
                         print(f"[Diag] {tool_name} RAW OUTPUT CONTENT:")
@@ -409,6 +416,44 @@ async def run_research_agent(
                 print("[Diag] call_llm_with_tools SUCCESS")
 
                 normalized = _normalize_result(result)
+
+                if (
+                    normalized["status"] == "error"
+                    and not normalized["professors"]
+                    and _captured_search_output["text"]
+                ):
+                    print("[Diag] Model reported guard message as error — synthesizing final answer from captured search results")
+                    synthesis_prompt = f"""You are given raw candidate professor data below, already
+retrieved for a student with these research interests: "{research_interests}"
+
+RAW CANDIDATES:
+{_captured_search_output["text"][:6000]}
+
+Evaluate relevance and produce ONLY a JSON object in this exact shape,
+no markdown, no other text:
+{{
+  "status": "success",
+  "professors": [
+    {{
+      "name": "...",
+      "university": "...",
+      "department": "...",
+      "research_area": "...",
+      "relevance_score": 0.0,
+      "email": "...",
+      "reason": "..."
+    }}
+  ]
+}}
+If no professors are clearly relevant, return {{"status": "no_results", "professors": []}}.
+"""
+                    try:
+                        synthesis_text = strip_json_fences(await call_llm(synthesis_prompt))
+                        synthesis_result = _json.loads(synthesis_text)
+                        normalized = _normalize_result(synthesis_result)
+                        print(f"[Diag] Synthesis fallback succeeded, status={normalized['status']}, professors={len(normalized['professors'])}")
+                    except Exception as e:
+                        print(f"[Diag] Synthesis fallback failed: {e}")
 
                 print(
                     "[ResearchAgent] done, "
